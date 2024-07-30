@@ -1,28 +1,52 @@
-if([String]::IsNullOrEmpty($MyInvocation.PSScriptRoot)) {
-    Write-Error 'This script should not be called directly! It has to be imported from a buckets test file!'
-    exit 1
-}
-
-. "$psscriptroot\Scoop-TestLib.ps1"
-. "$psscriptroot\..\lib\core.ps1"
-. "$psscriptroot\..\lib\manifest.ps1"
-. "$psscriptroot\..\lib\unix.ps1"
-
-$repo_dir = (Get-Item $MyInvocation.PSScriptRoot).FullName
-
-$repo_files = @(Get-ChildItem $repo_dir -file -recurse)
-
-$project_file_exclusions = @(
-    $([regex]::Escape($repo_dir)+'(\\|/).git(\\|/).*$'),
-    '.sublime-workspace$',
-    '.DS_Store$',
-    'supporting(\\|/)validator(\\|/)packages(\\|/)*'
+#Requires -Version 5.1
+#Requires -Modules @{ ModuleName = 'BuildHelpers'; ModuleVersion = '2.0.1' }
+#Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.2.0' }
+param(
+    [String] $BucketPath = $MyInvocation.PSScriptRoot
 )
 
-$bucketdir = $repo_dir
-if(Test-Path("$repo_dir\bucket")) {
-    $bucketdir = "$repo_dir\bucket"
-}
+. "$PSScriptRoot\Scoop-00File.Tests.ps1" -TestPath $BucketPath
 
-. "$psscriptroot\Import-File-Tests.ps1"
-. "$psscriptroot\Scoop-Manifest.Tests.ps1" -bucketdir $bucketdir
+Describe 'Manifest validates against the schema' {
+    BeforeDiscovery {
+        $bucketDir = if (Test-Path "$BucketPath\bucket") {
+            "$BucketPath\bucket"
+        } else {
+            $BucketPath
+        }
+        if ($env:CI -eq $true) {
+            Set-BuildEnvironment -Force
+            $manifestFiles = @(Get-GitChangedFile -Path $bucketDir -Include '*.json' -Commit $env:BHCommitHash)
+        } else {
+            $manifestFiles = (Get-ChildItem $bucketDir -Filter '*.json' -Recurse).FullName
+        }
+    }
+    BeforeAll {
+        Add-Type -Path "$PSScriptRoot\..\supporting\validator\bin\Scoop.Validator.dll"
+        # Could not use backslash '\' in Linux/macOS for .NET object 'Scoop.Validator'
+        $validator = New-Object Scoop.Validator("$PSScriptRoot/../schema.json", $true)
+        $global:quotaExceeded = $false
+    }
+    It '<_>' -TestCases $manifestFiles {
+        if ($global:quotaExceeded) {
+            Set-ItResult -Skipped -Because 'Schema validation limit exceeded.'
+        } else {
+            $file = $_ # exception handling may overwrite $_
+            try {
+                $validator.Validate($file)
+                if ($validator.Errors.Count -gt 0) {
+                    Write-Host "  [-] $_ has $($validator.Errors.Count) Error$(If($validator.Errors.Count -gt 1) { 's' })!" -ForegroundColor Red
+                    Write-Host $validator.ErrorsAsString -ForegroundColor Yellow
+                }
+                $validator.Errors.Count | Should -Be 0
+            } catch {
+                if ($_.Exception.Message -like '*The free-quota limit of 1000 schema validations per hour has been reached.*') {
+                    $global:quotaExceeded = $true
+                    Set-ItResult -Skipped -Because 'Schema validation limit exceeded.'
+                } else {
+                    throw
+                }
+            }
+        }
+    }
+}

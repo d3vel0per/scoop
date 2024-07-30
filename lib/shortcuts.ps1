@@ -5,34 +5,35 @@ function create_startmenu_shortcuts($manifest, $dir, $global, $arch) {
         $target = [System.IO.Path]::Combine($dir, $_.item(0))
         $target = New-Object System.IO.FileInfo($target)
         $name = $_.item(1)
-        $arguments = ""
+        $arguments = ''
         $icon = $null
-        if($_.length -ge 3) {
+        if ($_.length -ge 3) {
             $arguments = $_.item(2)
         }
-        if($_.length -ge 4) {
+        if ($_.length -ge 4) {
             $icon = [System.IO.Path]::Combine($dir, $_.item(3))
             $icon = New-Object System.IO.FileInfo($icon)
         }
-        $arguments = (substitute $arguments @{ '$dir' = $dir; '$original_dir' = $original_dir; '$persist_dir' = $persist_dir})
+        $arguments = (substitute $arguments @{ '$dir' = $dir; '$original_dir' = $original_dir; '$persist_dir' = $persist_dir })
         startmenu_shortcut $target $name $arguments $icon $global
     }
 }
 
 function shortcut_folder($global) {
-    $directory = [System.IO.Path]::Combine([Environment]::GetFolderPath('startmenu'), 'Programs', 'Scoop Apps')
-    if($global) {
-        $directory = [System.IO.Path]::Combine([Environment]::GetFolderPath('commonstartmenu'), 'Programs', 'Scoop Apps')
+    if ($global) {
+        $startmenu = 'CommonStartMenu'
+    } else {
+        $startmenu = 'StartMenu'
     }
-    return $(ensure $directory)
+    return Convert-Path (ensure ([System.IO.Path]::Combine([Environment]::GetFolderPath($startmenu), 'Programs', 'Scoop Apps')))
 }
 
 function startmenu_shortcut([System.IO.FileInfo] $target, $shortcutName, $arguments, [System.IO.FileInfo]$icon, $global) {
-    if(!$target.Exists) {
+    if (!$target.Exists) {
         Write-Host -f DarkRed "Creating shortcut for $shortcutName ($(fname $target)) failed: Couldn't find $target"
         return
     }
-    if($icon -and !$icon.Exists) {
+    if ($icon -and !$icon.Exists) {
         Write-Host -f DarkRed "Creating shortcut for $shortcutName ($(fname $target)) failed: Couldn't find icon $icon"
         return
     }
@@ -50,11 +51,11 @@ function startmenu_shortcut([System.IO.FileInfo] $target, $shortcutName, $argume
     if ($arguments) {
         $wsShell.Arguments = $arguments
     }
-    if($icon -and $icon.Exists) {
+    if ($icon -and $icon.Exists) {
         $wsShell.IconLocation = $icon.FullName
     }
     $wsShell.Save()
-    write-host "Creating shortcut for $shortcutName ($(fname $target))"
+    Write-Host "Creating shortcut for $shortcutName ($(fname $target))"
 }
 
 # Removes the Startmenu shortcut if it exists
@@ -62,23 +63,10 @@ function rm_startmenu_shortcuts($manifest, $global, $arch) {
     $shortcuts = @(arch_specific 'shortcuts' $manifest $arch)
     $shortcuts | Where-Object { $_ -ne $null } | ForEach-Object {
         $name = $_.item(1)
-        $shortcut = "$(shortcut_folder $global)\$name.lnk"
-        write-host "Removing shortcut $(friendly_path $shortcut)"
-        if(Test-Path -Path $shortcut) {
-             Remove-Item $shortcut
-        }
-        # Before issue 1514 Startmenu shortcut removal
-        #
-        # Shortcuts that should have been installed globally would
-        # have been installed locally up until 27 June 2017.
-        #
-        # TODO: Remove this 'if' block and comment after
-        #       27 June 2018.
-        if($global) {
-            $shortcut = "$(shortcut_folder $false)\$name.lnk"
-            if(Test-Path -Path $shortcut) {
-                 Remove-Item $shortcut
-            }
+        $shortcut = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath("$(shortcut_folder $global)\$name.lnk")
+        Write-Host "Removing shortcut $(friendly_path $shortcut)"
+        if (Test-Path -Path $shortcut) {
+            Remove-Item $shortcut
         }
     }
 }

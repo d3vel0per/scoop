@@ -1,23 +1,27 @@
 # Usage: scoop cat <app>
 # Summary: Show content of specified manifest.
+# Help: Show content of specified manifest.
+# If configured, `bat` will be used to pretty-print the JSON.
+# See `cat_style` in `scoop help config` for further information.
 
 param($app)
 
-. "$psscriptroot\..\lib\manifest.ps1"
-. "$psscriptroot\..\lib\install.ps1"
-. "$psscriptroot\..\lib\help.ps1"
-
-reset_aliases
+. "$PSScriptRoot\..\lib\json.ps1" # 'ConvertToPrettyJson'
+. "$PSScriptRoot\..\lib\manifest.ps1" # 'Get-Manifest'
 
 if (!$app) { error '<app> missing'; my_usage; exit 1 }
 
-$app, $bucket, $null = parse_app $app
-$app, $manifest, $bucket, $url = Find-Manifest $app $bucket
+$null, $manifest, $bucket, $url = Get-Manifest $app
 
 if ($manifest) {
-        $manifest | ConvertToPrettyJson | Write-Host
+    $style = get_config CAT_STYLE
+    if ($style) {
+        $manifest | ConvertToPrettyJson | bat --no-paging --style $style --language json
+    } else {
+        $manifest | ConvertToPrettyJson
+    }
 } else {
-        abort "Couldn't find manifest for '$app'$(if($url) { " at the URL $url" })."
+    abort "Couldn't find manifest for '$app'$(if($bucket) { " from '$bucket' bucket" } elseif($url) { " at '$url'" })."
 }
 
 exit $exitCode

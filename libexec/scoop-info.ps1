@@ -1,141 +1,245 @@
-# Usage: scoop info <app>
+# Usage: scoop info <app> [options]
 # Summary: Display information about an app
-param($app)
+# Help: Options:
+#   -v, --verbose   Show full paths and URLs
 
-. "$psscriptroot\..\lib\buckets.ps1"
-. "$psscriptroot\..\lib\core.ps1"
-. "$psscriptroot\..\lib\depends.ps1"
-. "$psscriptroot\..\lib\help.ps1"
-. "$psscriptroot\..\lib\install.ps1"
-. "$psscriptroot\..\lib\manifest.ps1"
-. "$psscriptroot\..\lib\versions.ps1"
+. "$PSScriptRoot\..\lib\getopt.ps1"
+. "$PSScriptRoot\..\lib\manifest.ps1" # 'Get-Manifest'
+. "$PSScriptRoot\..\lib\versions.ps1" # 'Get-InstalledVersion'
 
-reset_aliases
+$opt, $app, $err = getopt $args 'v' 'verbose'
+if ($err) { error "scoop info: $err"; exit 1 }
+$verbose = $opt.v -or $opt.verbose
 
-if(!$app) { my_usage; exit 1 }
+if (!$app) { my_usage; exit 1 }
 
-if ($app -match '^(ht|f)tps?://|\\\\') {
-    # check if $app is a URL or UNC path
-    $url = $app
-    $app = appname_from_url $url
-    $global = installed $app $true
-    $status = app_status $app $global
-    $manifest = url_manifest $url
-    $manifest_file = $url
-} else {
-    # else $app is a normal app name
-    $global = installed $app $true
-    $app, $bucket, $null = parse_app $app
-    $status = app_status $app $global
-    $manifest, $bucket = find_manifest $app $bucket
-}
+$app, $manifest, $bucket, $url = Get-Manifest $app
 
 if (!$manifest) {
-    abort "Could not find manifest for '$(show_app $app $bucket)'."
+    abort "Could not find manifest for '$(show_app $app)' in local buckets."
 }
 
+$global = installed $app $true
+$status = app_status $app $global
 $install = install_info $app $status.version $global
-$status.installed = $install.bucket -eq $bucket
+$status.installed = $bucket -and $install.bucket -eq $bucket
 $version_output = $manifest.version
-if (!$manifest_file) {
-    $manifest_file = manifest_path $app $bucket
+$manifest_file = if ($bucket) {
+    manifest_path $app $bucket
+} else {
+    $url
 }
 
-$dir = versiondir $app 'current' $global
-$original_dir = versiondir $app $manifest.version $global
-$persist_dir = persistdir $app $global
+if ($verbose) {
+    $dir = currentdir $app $global
+    $original_dir = versiondir $app $manifest.version $global
+    $persist_dir = persistdir $app $global
+} else {
+    $dir, $original_dir, $persist_dir = "<root>", "<root>", "<root>"
+}
 
-if($status.installed) {
+if ($status.installed) {
     $manifest_file = manifest_path $app $install.bucket
     if ($install.url) {
         $manifest_file = $install.url
     }
-    if($status.version -eq $manifest.version) {
+    if ($status.version -eq $manifest.version) {
         $version_output = $status.version
     } else {
         $version_output = "$($status.version) (Update to $($manifest.version) available)"
     }
 }
 
-Write-Output "Name: $app"
+$item = [ordered]@{ Name = $app }
 if ($manifest.description) {
-    Write-Output "Description: $($manifest.description)"
+    $item.Description = $manifest.description
 }
-Write-Output "Version: $version_output"
-Write-Output "Website: $($manifest.homepage)"
+$item.Version = $version_output
+if ($bucket) {
+    $item.Bucket = $bucket
+}
+if ($manifest.homepage) {
+    $item.Website = $manifest.homepage.TrimEnd('/')
+}
 # Show license
 if ($manifest.license) {
-    $license = $manifest.license
-    if ($manifest.license.identifier -and $manifest.license.url) {
-        $license = "$($manifest.license.identifier) ($($manifest.license.url))"
+    $item.License = if ($manifest.license.identifier -and $manifest.license.url) {
+        if ($verbose) { "$($manifest.license.identifier) ($($manifest.license.url))" } else { $manifest.license.identifier }
     } elseif ($manifest.license -match '^((ht)|f)tps?://') {
-        $license = "$($manifest.license)"
+        $manifest.license
     } elseif ($manifest.license -match '[|,]') {
-        $licurl = $manifest.license.Split("|,") | ForEach-Object {"https://spdx.org/licenses/$_.html"}
-        $license = "$($manifest.license) ($($licurl -join ', '))"
+        if ($verbose) {
+            "$($manifest.license) ($(($manifest.license -Split "\||," | ForEach-Object { "https://spdx.org/licenses/$_.html" }) -join ', '))"
+        } else {
+            $manifest.license
+        }
     } else {
-        $license = "$($manifest.license) (https://spdx.org/licenses/$($manifest.license).html)"
+        if ($verbose) { "$($manifest.license) (https://spdx.org/licenses/$($manifest.license).html)" } else { $manifest.license }
     }
-    Write-Output "License: $license"
+}
+
+if ($manifest.depends) {
+    $item.Dependencies = $manifest.depends -join ' | '
+}
+
+if (Test-Path $manifest_file) {
+    if (Get-Command git -ErrorAction Ignore) {
+        $gitinfo = (Invoke-Git -Path (Split-Path $manifest_file) -ArgumentList @('log', '-1', '-s', '--format=%aD#%an', $manifest_file) 2> $null) -Split '#'
+    }
+    if ($gitinfo) {
+        $item.'Updated at' = $gitinfo[0] | Get-Date
+        $item.'Updated by' = $gitinfo[1]
+    } else {
+        $item.'Updated at' = (Get-Item $manifest_file).LastWriteTime
+        $item.'Updated by' = (Get-Acl $manifest_file).Owner.Split('\')[-1]
+    }
 }
 
 # Manifest file
-Write-Output "Manifest:`n  $manifest_file"
+if ($verbose) { $item.Manifest = $manifest_file }
 
-if($status.installed) {
+if ($status.installed) {
     # Show installed versions
-    Write-Output "Installed:"
-    $versions = Get-InstalledVersion -AppName $app -Global:$global
-    $versions | ForEach-Object {
-        $dir = versiondir $app $_ $global
-        if($global) { $dir += " *global*" }
-        Write-Output "  $dir"
+    $installed_output = @()
+    Get-InstalledVersion -AppName $app -Global:$global | ForEach-Object {
+        $installed_output += if ($verbose) { versiondir $app $_ $global } else { "$_$(if ($global) { " *global*" })" }
+    }
+    $item.Installed = $installed_output -join "`n"
+
+    if ($verbose) {
+        # Show size of installation
+        $appsdir = appsdir $global
+
+        # Collect file list from each location
+        $appFiles = Get-ChildItem $appsdir -Filter $app
+        $currentFiles = Get-ChildItem $appFiles.FullName -Filter (Select-CurrentVersion $app $global)
+        $persistFiles = Get-ChildItem $persist_dir -ErrorAction Ignore # Will fail if app does not persist data
+        $cacheFiles = Get-ChildItem $cachedir -Filter "$app#*"
+
+        # Get the sum of each file list
+        $fileTotals = @()
+        foreach ($fileType in ($appFiles, $currentFiles, $persistFiles, $cacheFiles)) {
+            if ($null -ne $fileType) {
+                $fileSum = (Get-ChildItem $fileType.FullName -Recurse -File | Measure-Object -Property Length -Sum).Sum
+                $fileTotals += coalesce $fileSum 0
+            } else {
+                $fileTotals += 0
+            }
+        }
+
+        # Old versions = app total - current version size
+        $fileTotals += $fileTotals[0] - $fileTotals[1]
+
+        if ($fileTotals[2] + $fileTotals[3] + $fileTotals[4] -eq 0) {
+            # Simple app size output if no old versions, persisted data, cached downloads
+            $item.'Installed size' = filesize $fileTotals[1]
+        } else {
+            $fileSizes = [ordered] @{
+                'Current version:  ' = $fileTotals[1]
+                'Old versions:     ' = $fileTotals[4]
+                'Persisted data:   ' = $fileTotals[2]
+                'Cached downloads: ' = $fileTotals[3]
+                'Total:            ' = $fileTotals[0] + $fileTotals[2] + $fileTotals[3]
+            }
+
+            $fileSizeOutput = @()
+
+            # Don't output empty categories
+            $fileSizes.GetEnumerator() | ForEach-Object {
+                if ($_.Value -ne 0) {
+                    $fileSizeOutput += $_.Key + (filesize $_.Value)
+                }
+            }
+
+            $item.'Installed size' = $fileSizeOutput -join "`n"
+        }
     }
 } else {
-    Write-Output "Installed: No"
+    if ($verbose) {
+        # Get download size if app not installed
+        $totalPackage = 0
+        foreach ($url in @(url $manifest (Get-DefaultArchitecture))) {
+            try {
+                if (Test-Path (cache_path $app $manifest.version $url)) {
+                    $cached = " (latest version is cached)"
+                } else {
+                    $cached = $null
+                }
+
+                $urlLength = (Invoke-WebRequest $url -Method Head).Headers.'Content-Length' | ForEach-Object { [int]$_ }
+                $totalPackage += $urlLength
+            } catch [System.Management.Automation.RuntimeException] {
+                $totalPackage = 0
+                $packageError = "the server at $(([System.Uri]$url).Host) did not send a Content-Length header"
+                break
+            } catch {
+                $totalPackage = 0
+                $packageError = "the server at $(([System.Uri]$url).Host) is down"
+                break
+            }
+        }
+        if ($totalPackage -ne 0) {
+            $item.'Download size' = "$(filesize $totalPackage)$cached"
+        } else {
+            $item.'Download size' = "Unknown ($packageError)$cached"
+        }
+    }
 }
 
 $binaries = @(arch_specific 'bin' $manifest $install.architecture)
-if($binaries) {
-    $binary_output = "Binaries:`n "
+if ($binaries) {
+    $binary_output = @()
     $binaries | ForEach-Object {
-        if($_ -is [System.Array]) {
-            $binary_output += " $($_[1]).exe"
+        if ($_ -is [System.Array]) {
+            $binary_output += "$($_[1]).$($_[0].Split('.')[-1])"
         } else {
-            $binary_output += " $_"
+            $binary_output += $_
         }
     }
-    Write-Output $binary_output
+    $item.Binaries = $binary_output -join " | "
 }
-$env_set = (arch_specific 'env_set' $manifest $install.architecture)
-$env_add_path = (arch_specific 'env_add_path' $manifest $install.architecture)
-if($env_set -or $env_add_path) {
-    if($status.installed) {
-        Write-Output "Environment:"
-    } else {
-        Write-Output "Environment: (simulated)"
+$shortcuts = @(arch_specific 'shortcuts' $manifest $install.architecture)
+if ($shortcuts) {
+    $shortcut_output = @()
+    $shortcuts | ForEach-Object {
+        $shortcut_output += $_[1]
     }
+    $item.Shortcuts = $shortcut_output -join " | "
 }
-if($env_set) {
+$env_set = arch_specific 'env_set' $manifest $install.architecture
+if ($env_set) {
+    $env_vars = @()
     $env_set | Get-Member -member noteproperty | ForEach-Object {
-        $value = env $_.name $global
-        if(!$value) {
-            $value = format $env_set.$($_.name) @{ "dir" = $dir }
-        }
-        Write-Output "  $($_.name)=$value"
+        $env_vars += "$($_.name) = $(substitute $env_set.$($_.name) @{ '$dir' = $dir })"
     }
+    $item.Environment = $env_vars -join "`n"
 }
-if($env_add_path) {
+$env_add_path = arch_specific 'env_add_path' $manifest $install.architecture
+if ($env_add_path) {
+    $env_path = @()
     $env_add_path | Where-Object { $_ } | ForEach-Object {
-        if($_ -eq '.') {
-            Write-Output "  PATH=%PATH%;$dir"
+        $env_path += if ($_ -eq '.') {
+            $dir
         } else {
-            Write-Output "  PATH=%PATH%;$dir\$_"
+            "$dir\$_"
         }
     }
+    $item.'Path Added' = $env_path -join "`n"
 }
 
-# Show notes
-show_notes $manifest $dir $original_dir $persist_dir
+if ($manifest.suggest) {
+    $suggest_output = @()
+    $manifest.suggest.PSObject.Properties | ForEach-Object {
+        $suggest_output += $_.Value -join ' | '
+    }
+    $item.Suggestions = $suggest_output -join ' | '
+}
+
+if ($manifest.notes) {
+    # Show notes
+    $item.Notes = (substitute $manifest.notes @{ '$dir' = $dir; '$original_dir' = $original_dir; '$persist_dir' = $persist_dir }) -join "`n"
+}
+
+[PSCustomObject]$item
 
 exit 0

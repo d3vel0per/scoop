@@ -1,69 +1,103 @@
-#requires -Version 5.0
-#requires -Modules @{ ModuleName = 'BuildHelpers'; ModuleVersion = '2.0.1' }
-#requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '4.4.0' }
-#requires -Modules @{ ModuleName = 'PSScriptAnalyzer'; ModuleVersion = '1.17.1' }
+#Requires -Version 5.1
+#Requires -Modules @{ ModuleName = 'BuildHelpers'; ModuleVersion = '2.0.1' }
+#Requires -Modules @{ ModuleName = 'Pester'; ModuleVersion = '5.2.0' }
+#Requires -Modules @{ ModuleName = 'PSScriptAnalyzer'; ModuleVersion = '1.17.1' }
 param(
-    [String] $TestPath = 'test/'
+    [String] $TestPath = (Convert-Path "$PSScriptRoot\..")
 )
 
-$resultsXml = "$PSScriptRoot/TestResults.xml"
+$pesterConfig = New-PesterConfiguration -Hashtable @{
+    Run    = @{
+        Path     = $TestPath
+        PassThru = $true
+    }
+    Output = @{
+        Verbosity = 'Detailed'
+    }
+}
 $excludes = @()
 
-$splat = @{
-    Path         = $TestPath
-    OutputFile   = $resultsXml
-    OutputFormat = 'NUnitXML'
-    PassThru     = $true
+if ($IsLinux -or $IsMacOS) {
+    Write-Warning 'Skipping Windows-only tests on Linux/macOS'
+    $excludes += 'Windows'
 }
 
 if ($env:CI -eq $true) {
-    $commit = if ($env:APPVEYOR_PULL_REQUEST_HEAD_COMMIT) { $env:APPVEYOR_PULL_REQUEST_HEAD_COMMIT } else { $env:APPVEYOR_REPO_COMMIT }
-    $commitMessage = "$env:APPVEYOR_REPO_COMMIT_MESSAGE $env:APPVEYOR_REPO_COMMIT_MESSAGE_EXTENDED".TrimEnd()
+    Write-Host "Load 'BuildHelpers' environment variables ..."
+    Set-BuildEnvironment -Force
 
-    if ($commitMessage -match '!linter') {
-        Write-Warning "Skipping code linting per commit flag '!linter'"
-        $excludes += 'Linter'
+    # Check if tests are called from the Core itself, if so, adding excludes
+    if ($TestPath -eq (Convert-Path "$PSScriptRoot\..")) {
+        if ($env:BHCommitMessage -match '!linter') {
+            Write-Warning "Skipping code linting per commit flag '!linter'"
+            $excludes += 'Linter'
+        }
+
+        $changedScripts = (Get-GitChangedFile -Include '*.ps1', '*.psd1', '*.psm1' -Commit $env:BHCommitHash)
+        if (!$changedScripts) {
+            Write-Warning "Skipping tests and code linting for PowerShell scripts because they didn't change"
+            $excludes += 'Linter'
+            $excludes += 'Scoop'
+        }
+
+        if (!($changedScripts -like '*decompress.ps1') -and !($changedScripts -like '*Decompress.Tests.ps1')) {
+            Write-Warning "Skipping tests and code linting for decompress.ps1 files because it didn't change"
+            $excludes += 'Decompress'
+        }
+
+        if ('Decompress' -notin $excludes -and 'Windows' -notin $excludes) {
+            Write-Host 'Install decompress dependencies ...'
+
+            Write-Host (7z.exe | Select-String -Pattern '7-Zip').ToString()
+
+            $env:SCOOP_HELPERS_PATH = 'C:\projects\helpers'
+            if (!(Test-Path $env:SCOOP_HELPERS_PATH)) {
+                New-Item -ItemType Directory -Path $env:SCOOP_HELPERS_PATH | Out-Null
+            }
+
+            $env:SCOOP_LESSMSI_PATH = "$env:SCOOP_HELPERS_PATH\lessmsi\lessmsi.exe"
+            if (!(Test-Path $env:SCOOP_LESSMSI_PATH)) {
+                $source = 'https://github.com/activescott/lessmsi/releases/download/v1.10.0/lessmsi-v1.10.0.zip'
+                $destination = "$env:SCOOP_HELPERS_PATH\lessmsi.zip"
+                Invoke-WebRequest -Uri $source -OutFile $destination
+                & 7z.exe x "$env:SCOOP_HELPERS_PATH\lessmsi.zip" -o"$env:SCOOP_HELPERS_PATH\lessmsi" -y | Out-Null
+            }
+
+            $env:SCOOP_INNOUNP_PATH = "$env:SCOOP_HELPERS_PATH\innounp\innounp.exe"
+            if (!(Test-Path $env:SCOOP_INNOUNP_PATH)) {
+                $source = 'https://raw.githubusercontent.com/ScoopInstaller/Binary/master/innounp/innounp050.rar'
+                $destination = "$env:SCOOP_HELPERS_PATH\innounp.rar"
+                Invoke-WebRequest -Uri $source -OutFile $destination
+                & 7z.exe x "$env:SCOOP_HELPERS_PATH\innounp.rar" -o"$env:SCOOP_HELPERS_PATH\innounp" -y | Out-Null
+            }
+        }
     }
 
-    $changed_scripts = (Get-GitChangedFile -Include '*.ps1' -Commit $commit)
-    if (!$changed_scripts) {
-        Write-Warning "Skipping tests and code linting for *.ps1 files because they didn't change"
-        $excludes += 'Linter'
-        $excludes += 'Scoop'
-    }
-
-    $changed_scripts = (Get-GitChangedFile -Include '*decompress.ps1' -Commit $commit)
-    if (!$changed_scripts) {
-        Write-Warning "Skipping tests and code linting for decompress.ps1 files because it didn't change"
-        $excludes += 'Decompress'
-    }
-
-    if ($env:CI_WINDOWS -ne $true) {
-        Write-Warning "Skipping tests and code linting for decompress.ps1 because they only work on Windows"
-        $excludes += 'Decompress'
-    }
-
-    if ($commitMessage -match '!manifests') {
-        Write-Warning "Skipping manifest validation per commit flag '!manifests'"
-        $excludes += 'Manifests'
-    }
-
-    $changed_manifests = (Get-GitChangedFile -Include '*.json' -Commit $commit)
-    if (!$changed_manifests) {
-        Write-Warning "Skipping tests and validation for manifest files because they didn't change"
-        $excludes += 'Manifests'
-    }
-
-    if ($excludes.Length -gt 0) {
-        $splat.ExcludeTag = $excludes
-    }
+    # Display CI environment variables
+    $buildVariables = (Get-ChildItem -Path 'Env:').Where({ $_.Name -match '^(?:BH|CI(?:_|$)|APPVEYOR|GITHUB_|RUNNER_|SCOOP_)' })
+    $details = $buildVariables |
+        Where-Object -FilterScript { $_.Name -notmatch 'EMAIL' } |
+        Sort-Object -Property 'Name' |
+        Format-Table -AutoSize -Property 'Name', 'Value' |
+        Out-String
+    Write-Host 'CI variables:'
+    Write-Host $details -ForegroundColor DarkGray
 }
 
-Write-Host 'Invoke-Pester' @splat
-$result = Invoke-Pester @splat
-
-(New-Object Net.WebClient).UploadFile("https://ci.appveyor.com/api/testresults/nunit/$($env:APPVEYOR_JOB_ID)", $resultsXml)
-
-if ($result.FailedCount -gt 0) {
-    exit $result.FailedCount
+if ($excludes.Length -gt 0) {
+    $pesterConfig.Filter.ExcludeTag = $excludes
 }
+
+if ($env:BHBuildSystem -eq 'AppVeyor') {
+    # AppVeyor
+    $resultsXml = "$PSScriptRoot\TestResults.xml"
+    $pesterConfig.TestResult.Enabled = $true
+    $pesterConfig.TestResult.OutputPath = $resultsXml
+    $result = Invoke-Pester -Configuration $pesterConfig
+    Add-TestResultToAppveyor -TestFile $resultsXml
+} else {
+    # GitHub Actions / Local
+    $result = Invoke-Pester -Configuration $pesterConfig
+}
+
+exit $result.FailedCount

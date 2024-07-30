@@ -3,22 +3,23 @@
 # Help: Used to resolve conflicts in favor of a particular app. For example,
 # if you've installed 'python' and 'python27', you can use 'scoop reset' to switch between
 # using one or the other.
+#
+# You can use '*' in place of <app> or `-a`/`--all` switch to reset all apps.
 
-. "$psscriptroot\..\lib\core.ps1"
-. "$psscriptroot\..\lib\manifest.ps1"
-. "$psscriptroot\..\lib\help.ps1"
-. "$psscriptroot\..\lib\getopt.ps1"
-. "$psscriptroot\..\lib\install.ps1"
-. "$psscriptroot\..\lib\versions.ps1"
-. "$psscriptroot\..\lib\shortcuts.ps1"
+. "$PSScriptRoot\..\lib\getopt.ps1"
+. "$PSScriptRoot\..\lib\manifest.ps1" # 'Select-CurrentVersion' (indirectly)
+. "$PSScriptRoot\..\lib\system.ps1" # 'env_add_path' (indirectly)
+. "$PSScriptRoot\..\lib\install.ps1"
+. "$PSScriptRoot\..\lib\versions.ps1" # 'Select-CurrentVersion'
+. "$PSScriptRoot\..\lib\shortcuts.ps1"
 
-reset_aliases
-$opt, $apps, $err = getopt $args
+$opt, $apps, $err = getopt $args 'a' 'all'
 if($err) { "scoop reset: $err"; exit 1 }
+$all = $opt.a -or $opt.all
 
-if(!$apps) { error '<app> missing'; my_usage; exit 1 }
+if(!$apps -and !$all) { error '<app> missing'; my_usage; exit 1 }
 
-if($apps -eq '*') {
+if($apps -eq '*' -or $all) {
     $local = installed_apps $false | ForEach-Object { ,@($_, $false) }
     $global = installed_apps $true | ForEach-Object { ,@($_, $true) }
     $apps = @($local) + @($global)
@@ -63,15 +64,13 @@ $apps | ForEach-Object {
 
     write-host "Resetting $app ($version)."
 
-    $dir = resolve-path (versiondir $app $version $global)
+    $dir = Convert-Path (versiondir $app $version $global)
     $original_dir = $dir
     $persist_dir = persistdir $app $global
 
     #region Workaround for #2952
-    $processdir = $dir | Select-Object -ExpandProperty Path
-    if (Get-Process | Where-Object { $_.Path -like "$processdir\*" }) {
-        error "Application is still running. Close all instances and try again."
-        continue
+    if (test_running_process $app $global) {
+        return
     }
     #endregion Workaround for #2952
 
@@ -81,10 +80,13 @@ $apps | ForEach-Object {
     $dir = link_current $dir
     create_shims $manifest $dir $global $architecture
     create_startmenu_shortcuts $manifest $dir $global $architecture
+    # unset all potential old env before re-adding
+    env_rm_path $manifest $dir $global $architecture
+    env_rm $manifest $global $architecture
     env_add_path $manifest $dir $global $architecture
-    env_set $manifest $dir $global $architecture
+    env_set $manifest $global $architecture
     # unlink all potential old link before re-persisting
-    unlink_persist_data $original_dir
+    unlink_persist_data $manifest $original_dir
     persist_data $manifest $original_dir $persist_dir
     persist_permission $manifest $global
 }

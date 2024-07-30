@@ -11,6 +11,10 @@
 .PARAMETER App
     Manifest name to search.
     Placeholders are supported.
+.PARAMETER CommitMessageFormat
+    The format of the commit message.
+    <app> will be replaced with the file name of manifest.
+    <version> will be replaced with the version of the latest manifest.
 .PARAMETER Dir
     The directory where to search for manifests.
 .PARAMETER Push
@@ -23,6 +27,8 @@
     An array of manifests, which should be updated all the time. (-ForceUpdate parameter to checkver)
 .PARAMETER SkipUpdated
     Updated manifests will not be shown.
+.PARAMETER ThrowError
+    Throw error as exception instead of just printing it.
 .EXAMPLE
     PS BUCKETROOT > .\bin\auto-pr.ps1 'someUsername/repository:branch' -Request
 .EXAMPLE
@@ -41,7 +47,7 @@ param(
     [String] $Upstream,
     [String] $OriginBranch = 'master',
     [String] $App = '*',
-    [Parameter(Mandatory = $true)]
+    [String] $CommitMessageFormat = '<app>: Update to version <version>',
     [ValidateScript( {
         if (!(Test-Path $_ -Type Container)) {
             throw "$_ is not a directory!"
@@ -54,14 +60,20 @@ param(
     [Switch] $Request,
     [Switch] $Help,
     [string[]] $SpecialSnowflakes,
-    [Switch] $SkipUpdated
+    [Switch] $SkipUpdated,
+    [Switch] $ThrowError
 )
 
 . "$PSScriptRoot\..\lib\manifest.ps1"
 . "$PSScriptRoot\..\lib\json.ps1"
-. "$PSScriptRoot\..\lib\unix.ps1"
 
-$Dir = Resolve-Path $Dir
+if ($App -ne '*' -and (Test-Path $App -PathType Leaf)) {
+    $Dir = Split-Path $App
+} elseif ($Dir) {
+    $Dir = Convert-Path $Dir
+} else {
+    throw "'-Dir' parameter required if '-App' is not a filepath!"
+}
 
 if ((!$Push -and !$Request) -or $Help) {
     Write-Host @'
@@ -79,7 +91,7 @@ Optional options:
     exit 0
 }
 
-if (is_unix) {
+if ($IsLinux -or $IsMacOS) {
     if (!(which hub)) {
         Write-Host "Please install hub ('brew install hub' or visit: https://hub.github.com/)" -ForegroundColor Yellow
         exit 1
@@ -93,7 +105,7 @@ if (is_unix) {
 
 function execute($cmd) {
     Write-Host $cmd -ForegroundColor Green
-    $output = Invoke-Expression $cmd
+    $output = Invoke-Command ([scriptblock]::Create($cmd))
 
     if ($LASTEXITCODE -gt 0) {
         abort "^^^ Error! See above ^^^ (last command: $cmd)"
@@ -102,7 +114,7 @@ function execute($cmd) {
     return $output
 }
 
-function pull_requests($json, [String] $app, [String] $upstream, [String] $manifest) {
+function pull_requests($json, [String] $app, [String] $upstream, [String] $manifest, [String] $commitMessage) {
     $version = $json.version
     $homepage = $json.homepage
     $branch = "manifest/$app-$version"
@@ -119,7 +131,7 @@ function pull_requests($json, [String] $app, [String] $upstream, [String] $manif
     Write-Host "Creating update $app ($version) ..." -ForegroundColor DarkCyan
     execute "hub checkout -b $branch"
     execute "hub add $manifest"
-    execute "hub commit -m '${app}: Update to version $version'"
+    execute "hub commit -m '$commitMessage"
     Write-Host "Pushing update $app ($version) ..." -ForegroundColor DarkCyan
     execute "hub push origin $branch"
 
@@ -134,7 +146,7 @@ function pull_requests($json, [String] $app, [String] $upstream, [String] $manif
     Write-Host "hub pull-request -m '<msg>' -b '$upstream' -h '$branch'" -ForegroundColor Green
 
     $msg = @"
-$app`: Update to version $version
+$commitMessage
 
 Hello lovely humans,
 a new version of [$app]($homepage) is available.
@@ -147,7 +159,7 @@ a new version of [$app]($homepage) is available.
     hub pull-request -m "$msg" -b "$upstream" -h "$branch"
     if ($LASTEXITCODE -gt 0) {
         execute 'hub reset'
-        abort "Pull Request failed! (hub pull-request -m '${app}: Update to version $version' -b '$upstream' -h '$branch')"
+        abort "Pull Request failed! (hub pull-request -m '$commitMessage' -b '$upstream' -h '$branch')"
     }
 }
 
@@ -160,11 +172,11 @@ if ($Push) {
     execute "hub push origin $OriginBranch"
 }
 
-. "$PSScriptRoot\checkver.ps1" -App $App -Dir $Dir -Update -SkipUpdated:$SkipUpdated
+. "$PSScriptRoot\checkver.ps1" -App $App -Dir $Dir -Update -SkipUpdated:$SkipUpdated -ThrowError:$ThrowError
 if ($SpecialSnowflakes) {
     Write-Host "Forcing update on our special snowflakes: $($SpecialSnowflakes -join ',')" -ForegroundColor DarkCyan
     $SpecialSnowflakes -split ',' | ForEach-Object {
-        . "$PSScriptRoot\checkver.ps1" $_ -Dir $Dir -ForceUpdate
+        . "$PSScriptRoot\checkver.ps1" $_ -Dir $Dir -ForceUpdate -ThrowError:$ThrowError
     }
 }
 
@@ -181,7 +193,7 @@ hub diff --name-only | ForEach-Object {
         return
     }
     $version = $json.version
-
+    $CommitMessage = $CommitMessageFormat -replace '<app>',$app -replace '<version>',$version
     if ($Push) {
         Write-Host "Creating update $app ($version) ..." -ForegroundColor DarkCyan
         execute "hub add $manifest"
@@ -190,12 +202,12 @@ hub diff --name-only | ForEach-Object {
         $status = execute 'hub status --porcelain -uno'
         $status = $status | Where-Object { $_ -match "M\s{2}.*$app.json" }
         if ($status -and $status.StartsWith('M  ') -and $status.EndsWith("$app.json")) {
-            execute "hub commit -m '${app}: Update to version $version'"
+            execute "hub commit -m '$commitMessage'"
         } else {
             Write-Host "Skipping $app because only LF/CRLF changes were detected ..." -ForegroundColor Yellow
         }
     } else {
-        pull_requests $json $app $Upstream $manifest
+        pull_requests $json $app $Upstream $manifest $CommitMessage
     }
 }
 
